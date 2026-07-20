@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         {0 ,0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "t:v:?", long_options, NULL)) != EOF) {
+    while ((opt = getopt_long(argc, argv, "t:v:m:?", long_options, NULL)) != EOF) {
 
         switch (opt) {
         case 't':
