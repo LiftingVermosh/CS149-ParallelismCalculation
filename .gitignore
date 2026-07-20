@@ -1,0 +1,98 @@
+# ============================================================
+# Stanford CS149 — Parallel Computing
+# Personal implementation 
+# .gitignore for assignment
+# ============================================================
+
+# ---- C / C++ build artifacts ----
+*.o
+*.obj
+*.out
+*.exe
+objs/
+
+# ---- ISPC compiler outputs ----
+*.ispc.o
+*.sse4.o
+*.avx2.o
+*.avx512.o
+*.sse2.o
+
+# ---- CUDA build artifacts ----
+*.ptx
+*.cubin
+*.fatbin
+*.cu.o
+
+# ---- Libraries & archives ----
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.exp
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+*.egg
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- Rust / Cargo ----
+target/
+
+# ---- Submission archives ----
+submission.*
+*.tar.gz
+*.zip
+*.tar
+
+# ---- OS generated files ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---- IDE & editor files ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# ---- Profiling / debugging ----
+profile_data/
+dump/
+*.prof
+perf.data
+callgrind.out.*
+
+# ---- Environment & secrets ----
+.env
+.env.local
+*.pem
+*.key
+
+# ---- Logs ----
+logs/
+*.log
+
+# ---- Other things ----
+*.ppm
