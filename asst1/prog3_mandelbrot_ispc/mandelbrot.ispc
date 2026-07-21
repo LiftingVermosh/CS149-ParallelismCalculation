@@ -44,14 +44,14 @@ task void mandelbrot_ispc_task(uniform float x0, uniform float y0,
                                uniform int output[])
 {
 
-    // taskIndex is an ISPC built-in
-    
     uniform int ystart = taskIndex * rowsPerTask;
-    uniform int yend = ystart + rowsPerTask;
+    uniform int yend = min(ystart + rowsPerTask, height); 
     
     uniform float dx = (x1 - x0) / width;
     uniform float dy = (y1 - y0) / height;
     
+    // 如果 ystart 已经超过高度（任务数 > 高度），这个任务就不干活
+    if (ystart >= height) return;
     foreach (j = ystart ... yend, i = 0 ... width) {
             float x = x0 + i * dx;
             float y = y0 + j * dy;
@@ -67,11 +67,9 @@ export void mandelbrot_ispc_withtasks(uniform float x0, uniform float y0,
                                       uniform int maxIterations,
                                       uniform int output[])
 {
-
-    uniform int rowsPerTask = height / 2;
-
-    // create 2 tasks
-    launch[2] mandelbrot_ispc_task(x0, y0, x1, y1,
+    uniform int numTasks = 2; // @numTasks
+    uniform int rowsPerTask = (height + numTasks - 1) / numTasks; 
+    launch[numTasks] mandelbrot_ispc_task(x0, y0, x1, y1,
                                      width, height,
                                      rowsPerTask,
                                      maxIterations,
