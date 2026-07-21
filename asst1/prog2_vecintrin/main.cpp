@@ -249,7 +249,45 @@ void clampedExpVector(float* values, int* exponents, float* output, int N) {
   // Your solution should work for any value of
   // N and VECTOR_WIDTH, not just when VECTOR_WIDTH divides N
   //
+  __cs149_vec_float x;
+  __cs149_vec_int exp;
+  __cs149_vec_float result;
+  __cs149_vec_int zero = _cs149_vset_int(0);
+  __cs149_vec_int sub1 = _cs149_vset_int(1);
+  __cs149_vec_float clampLim = _cs149_vset_float(9.999999f);
   
+  // Calculate exp
+  for(int i = 0; i < N; i += VECTOR_WIDTH) {
+
+    result = _cs149_vset_float(1.f);
+
+    int width = (i + VECTOR_WIDTH > N) ? (N - i) : VECTOR_WIDTH;
+    __cs149_mask boundaryMask = _cs149_init_ones(width); 
+    __cs149_mask activeMask;
+
+    _cs149_vload_float(x, values + i, boundaryMask);
+    _cs149_vload_int(exp, exponents + i, boundaryMask);
+
+    _cs149_vgt_int(activeMask, exp, zero, boundaryMask);
+
+    // 指数运算
+    while(_cs149_cntbits(activeMask)) {            // 只要全不为 0 就不能停
+      _cs149_vmult_float(result, result, x, activeMask);   // 底数更新
+      _cs149_vsub_int(exp, exp, sub1, activeMask);         // 指数 -1
+      _cs149_vgt_int(activeMask, exp, zero, activeMask);   // 掩码更新 #1 - 指数 > 0 驱动
+      // 优化：截断同步发生在运算过程
+      // NOTE: 需要注意的是，增加一个“优化”并不总是会让程序变快；提前归零节省下的开销不一定能弥补每一轮循环都增加了一条向量指令的代价
+      // _cs149_vgt_float(activeMask, clampLim, result, activeMask); // 掩码更新 #2 - 结果 < ClampLim 驱动
+    }
+
+    // 截断
+    __cs149_mask clampMask;
+    _cs149_vgt_float(clampMask, result, clampLim, boundaryMask);  // 筛选需要 Clamp 的部分代码
+    _cs149_vmove_float(result, clampLim, clampMask);          // 填截断值
+
+    // 写入
+    _cs149_vstore_float(output + i, result, boundaryMask);
+  }
 }
 
 // returns the sum of all elements in values
@@ -270,11 +308,34 @@ float arraySumVector(float* values, int N) {
   //
   // CS149 STUDENTS TODO: Implement your vectorized version of arraySumSerial here
   //
+  __cs149_vec_float sumVec = _cs149_vset_float(0.f);
+  __cs149_mask maskAll = _cs149_init_ones();
   
+  // Step 1 - 纵向累加
   for (int i=0; i<N; i+=VECTOR_WIDTH) {
-
+    int width = (i + VECTOR_WIDTH > N) ? (N - i) : VECTOR_WIDTH;
+    __cs149_mask boundaryMask = _cs149_init_ones(width);
+    
+    __cs149_vec_float temp;
+    _cs149_vload_float(temp, values + i, boundaryMask);
+    _cs149_vadd_float(sumVec, sumVec, temp, boundaryMask);
+  }
+  // Step 2 - 横向交替
+  int step = 0;
+  int temp = VECTOR_WIDTH;
+  while(temp > 1) {
+    ++step;
+    temp >>= 1;
+  }
+  while(step > 0) {
+    _cs149_hadd_float(sumVec, sumVec);
+    _cs149_interleave_float(sumVec, sumVec);
+    --step;
   }
 
-  return 0.0;
+  // Step 3 - 写出
+  float result[VECTOR_WIDTH];
+  _cs149_vstore_float(result, sumVec, maskAll);
+  return result[0];
 }
 
