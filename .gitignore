@@ -97,3 +97,4 @@ logs/
 # ---- Other things ----
 *.ppm
 asst1/prog1_mandelbrot_threads/mandelbrot
+asst1/prog2_vecintrin/myexp
