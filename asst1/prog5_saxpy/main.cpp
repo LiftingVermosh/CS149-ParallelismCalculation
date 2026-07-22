@@ -26,6 +26,16 @@ static void verifyResult(int N, float* result, float* gold) {
     }
 }
 
+// for memory alignment
+static float* allocateAligned(size_t size) {
+    void* ptr = nullptr;
+
+    if (posix_memalign(&ptr, 64, size * sizeof(float)) != 0) {
+        return nullptr;
+    }
+    return (float*)ptr;
+}
+
 using namespace ispc;
 
 
@@ -35,13 +45,18 @@ int main() {
     const unsigned int TOTAL_BYTES = 4 * N * sizeof(float);
     const unsigned int TOTAL_FLOPS = 2 * N;
 
+    // Add for stream mode calculate
+    const unsigned int BYTES_NORMAL = 4 * N * sizeof(float); // 读X, 读Y, 读R, 写R
+    const unsigned int BYTES_STREAM = 3 * N * sizeof(float); // 读X, 读Y, 写R
+    
     float scale = 2.f;
 
-    float* arrayX = new float[N];
-    float* arrayY = new float[N];
-    float* resultSerial = new float[N];
-    float* resultISPC = new float[N];
-    float* resultTasks = new float[N];
+    float* arrayX = allocateAligned(N);
+    float* arrayY = allocateAligned(N);
+    float* resultSerial = allocateAligned(N);
+    float* resultISPC = allocateAligned(N);
+    float* resultTasks = allocateAligned(N);
+    float* resultStream = allocateAligned(N);    // Stream mode res
 
     // initialize array values
     for (unsigned int i=0; i<N; i++)
@@ -51,6 +66,7 @@ int main() {
         resultSerial[i] = 0.f;
         resultISPC[i] = 0.f;
         resultTasks[i] = 0.f;
+        resultStream[i] = 0.f;
     }
 
     //
@@ -106,15 +122,36 @@ int main() {
            toBW(TOTAL_BYTES, minTaskISPC),
            toGFLOPS(TOTAL_FLOPS, minTaskISPC));
 
-    printf("\t\t\t\t(%.2fx speedup from use of tasks)\n", minISPC/minTaskISPC);
-    //printf("\t\t\t\t(%.2fx speedup from ISPC)\n", minSerial/minISPC);
-    //printf("\t\t\t\t(%.2fx speedup from task ISPC)\n", minSerial/minTaskISPC);
+    //
+    //  Run the ISPC (multi-core) stream implementation
+    //
+    double minTaskStream = 1e30;
+    for (int i = 0; i < 3; ++i) {
+        double startTime = CycleTimer::currentSeconds();
+        saxpy_ispc_withtasks_stream(N, scale, arrayX, arrayY, resultStream);
+        double endTime = CycleTimer::currentSeconds();
+        minTaskStream = std::min(minTaskStream, endTime - startTime);
+    }
+    verifyResult(N, resultStream, resultSerial);
 
-    delete[] arrayX;
-    delete[] arrayY;
-    delete[] resultSerial;
-    delete[] resultISPC;
-    delete[] resultTasks;
+    printf("[saxpy task stream]:\t[%.3f] ms\t[%.3f] GB/s (Effective) \t[%.3f] GB/s (Physical)\t[%.3f] GFLOPS\n",
+           minTaskStream * 1000,
+           toBW(BYTES_NORMAL, minTaskStream), 
+           toBW(BYTES_STREAM, minTaskStream),
+           toGFLOPS(TOTAL_FLOPS, minTaskStream));
+
+    printf("\t\t\t\t(%.2fx speedup from use of tasks)\n", minISPC/minTaskISPC);
+    printf("\t\t\t\t(%.2fx speedup from ISPC)\n", minSerial/minISPC);
+    printf("\t\t\t\t(%.2fx speedup from task ISPC)\n", minSerial/minTaskISPC);
+    printf("\t\t\t\t(%.2fx speedup from streaming stores)\n", minTaskISPC / minTaskStream);
+    
+    // Adjust for alignment
+    free(arrayX);
+    free(arrayY);
+    free(resultSerial);
+    free(resultISPC);
+    free(resultTasks);
+    free(resultStream);
 
     return 0;
 }
