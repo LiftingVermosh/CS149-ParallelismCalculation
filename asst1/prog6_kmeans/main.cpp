@@ -89,7 +89,7 @@ int main() {
 
   // NOTE: we will grade your submission using the data in data.dat
   // which is read by this function
-  readData("./data.dat", &data, &clusterCentroids, &clusterAssignments, &M, &N,
+  readData("./data/data.dat", &data, &clusterCentroids, &clusterAssignments, &M, &N,
            &K, &epsilon);
 
   // NOTE: if you want to generate your own data (for fun), you can use the
@@ -131,7 +131,7 @@ int main() {
          K, epsilon);
 
   // Log the starting state of the algorithm
-  logToFile("./start.log", SAMPLE_RATE, data, clusterAssignments,
+  logToFile("./logs/start.log", SAMPLE_RATE, data, clusterAssignments,
             clusterCentroids, M, N, K);
 
   double startTime = CycleTimer::currentSeconds();
@@ -140,7 +140,7 @@ int main() {
   printf("[Total Time]: %.3f ms\n", (endTime - startTime) * 1000);
 
   // Log the end state of the algorithm
-  logToFile("./end.log", SAMPLE_RATE, data, clusterAssignments,
+  logToFile("./logs/end.log", SAMPLE_RATE, data, clusterAssignments,
             clusterCentroids, M, N, K);
 
   delete[] data;
