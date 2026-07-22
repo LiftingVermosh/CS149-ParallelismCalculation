@@ -32,9 +32,17 @@ int main() {
         // TODO: CS149 students.  Attempt to change the values in the
         // array here to meet the instructions in the handout: we want
         // to you generate best and worse-case speedups
-        
-        // starter code populates array with random input values
+#ifdef BUILD_BEST_CASE
+        // 所有数据都很大，计算量均匀且繁重
+        values[i] = 2.999f; 
+#elif defined(BUILD_WORST_CASE)
+        // 只有每组 SIMD 的第一个通道在工作，造成严重发散 (Divergence)
+        if (i % 8 == 0) values[i] = 2.999f;
+        else values[i] = 1.0f; 
+#else
+        // 原始随机数据
         values[i] = .001f + 2.998f * static_cast<float>(rand()) / RAND_MAX;
+#endif
     }
 
     // generate a gold version to check results
