@@ -1,6 +1,4 @@
 #include "tasksys.h"
-#include <thread>
-#include <vector>
 
 IRunnable::~IRunnable() {}
 
@@ -129,9 +127,39 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+
+
+    this->killed = false;
+    this->state.runnable = nullptr;
+    this->state.next_task_id = 0;
+    this->state.completed_tasks = 0;
+
+    for (int i = 0; i < num_threads; i++) {
+        workers.emplace_back([this]() {
+            while (!this->killed) {
+                IRunnable* r = this->state.runnable;
+                // 当 runnable 不为空且还有任务时才抢
+                if (r != nullptr) {
+                    int task_id = this->state.next_task_id.fetch_add(1);
+                    if (task_id < this->state.num_total_tasks) {
+                        // 执行
+                        r->runTask(task_id, this->state.num_total_tasks);
+                        // 标记完成
+                        this->state.completed_tasks.fetch_add(1);
+                    }
+                    // 没领到活：循环直到下一次 run() 
+                }
+            }
+        });
+    }
 }
 
-TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {}
+TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
+    this->killed.store(true);
+    for(auto& t : this->workers) {
+        t.join();
+    }
+}
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
 
@@ -142,9 +170,54 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // tasks sequentially on the calling thread.
     //
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    this->state.runnable = runnable;
+    this->state.num_total_tasks = num_total_tasks;
+    this->state.completed_tasks = 0;
+    
+    // 重置 next_task_id
+    this->state.next_task_id = 0;
+    // 主线程自旋等待
+    // while (this->state.completed_tasks.load() < num_total_tasks) {
+    //     // 方案一 - 啥也不干
+    //     // (.  , .)
+
+    //     // 方案二 - 帮着干
+    //     int task_id = this->state.next_task_id.fetch_add(1);
+    //     if (task_id < this->state.num_total_tasks) {
+    //         // 执行
+    //         this->state.runnable->runTask(task_id, this->state.num_total_tasks);
+    //         // 标记完成
+    //         this->state.completed_tasks.fetch_add(1);
+    //     }
+    // }
+
+    // 优化：避免原子变量竞争
+    while (true) {
+        int task_id = this->state.next_task_id.fetch_add(1);
+        if (task_id >= num_total_tasks) break; // 没活了，立刻退出这个抢活循环
+        runnable->runTask(task_id, num_total_tasks);
+        this->state.completed_tasks.fetch_add(1);
     }
+    // 没活，咬打火机
+    while (this->state.completed_tasks.load() < num_total_tasks) {
+        // (. ; .)
+    }
+
+    // // 再优化：先读后抢
+    // while (this->state.completed_tasks.load() < num_total_tasks) {
+    //     // 先做一次读取检查
+    //     if (this->state.next_task_id.load() < num_total_tasks) {
+    //         // 还有活就尝试执行原子抢夺
+    //         int task_id = this->state.next_task_id.fetch_add(1);
+    //         if (task_id < num_total_tasks) {
+    //             runnable->runTask(task_id, num_total_tasks);
+    //             this->state.completed_tasks.fetch_add(1);
+    //         }
+    //     }
+    //     // 如果任务领完了就 load 自旋
+    // }
+
+    this->state.runnable = nullptr; 
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
