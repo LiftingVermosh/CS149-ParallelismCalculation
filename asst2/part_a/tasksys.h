@@ -3,13 +3,15 @@
 
 #include "itasksys.h"
 
+#include <algorithm>
 #include <thread>
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 
 struct TaskState {
-    IRunnable* runnable;
+    std::atomic<IRunnable*> runnable;
     int num_total_tasks;
     std::atomic<int> next_task_id;      // 下一个要领取的任务 ID
     std::atomic<int> completed_tasks;   // 已经完成的任务总数
@@ -68,8 +70,9 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         void sync();
 
         std::vector<std::thread> workers;
-        std::atomic<bool> killed;           // 控制线程池销毁的开关
-        TaskState state;                    // 当前正在运行的任务状态
+        std::atomic<bool> killed;               // 控制线程池销毁的开关
+        std::atomic<int> active_workers;        // 正在使用当前任务状态的 worker 数
+        TaskState state;                        // 当前正在运行的任务状态
 };
 
 /*
@@ -87,6 +90,13 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
         void sync();
+
+        std::vector<std::thread> workers;
+        TaskState state;                    // 当前正在运行的任务状态
+        std::mutex _mutex;
+        std::condition_variable _cv_worker;
+        std::condition_variable _cv_main;
+        bool _killed;
 };
 
 #endif

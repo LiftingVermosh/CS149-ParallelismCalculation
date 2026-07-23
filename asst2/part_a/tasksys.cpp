@@ -129,17 +129,24 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     //
 
 
-    this->killed = false;
-    this->state.runnable = nullptr;
-    this->state.next_task_id = 0;
-    this->state.completed_tasks = 0;
+    this->killed.store(false);
+    this->active_workers.store(0);
+    this->state.runnable.store(nullptr);
+    this->state.next_task_id.store(0);
+    this->state.completed_tasks.store(0);
 
     for (int i = 0; i < num_threads; i++) {
         workers.emplace_back([this]() {
-            while (!this->killed) {
-                IRunnable* r = this->state.runnable;
+            while (!this->killed.load()) {
+                IRunnable* r = this->state.runnable.load(std::memory_order_acquire);
                 // 当 runnable 不为空且还有任务时才抢
                 if (r != nullptr) {
+                    this->active_workers.fetch_add(1, std::memory_order_acq_rel);
+                    if (this->state.runnable.load(std::memory_order_acquire) != r) {
+                        this->active_workers.fetch_sub(1, std::memory_order_acq_rel);
+                        continue;
+                    }
+
                     int task_id = this->state.next_task_id.fetch_add(1);
                     if (task_id < this->state.num_total_tasks) {
                         // 执行
@@ -147,6 +154,7 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
                         // 标记完成
                         this->state.completed_tasks.fetch_add(1);
                     }
+                    this->active_workers.fetch_sub(1, std::memory_order_acq_rel);
                     // 没领到活：循环直到下一次 run() 
                 }
             }
@@ -156,6 +164,7 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
 
 TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
     this->killed.store(true);
+    this->state.runnable.store(nullptr, std::memory_order_release);
     for(auto& t : this->workers) {
         t.join();
     }
@@ -170,12 +179,16 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // tasks sequentially on the calling thread.
     //
 
-    this->state.runnable = runnable;
+    if (num_total_tasks <= 0) {
+        return;
+    }
+
     this->state.num_total_tasks = num_total_tasks;
-    this->state.completed_tasks = 0;
+    this->state.completed_tasks.store(0);
     
     // 重置 next_task_id
-    this->state.next_task_id = 0;
+    this->state.next_task_id.store(0);
+    this->state.runnable.store(runnable, std::memory_order_release);
     // 主线程自旋等待
     // while (this->state.completed_tasks.load() < num_total_tasks) {
     //     // 方案一 - 啥也不干
@@ -217,7 +230,10 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     //     // 如果任务领完了就 load 自旋
     // }
 
-    this->state.runnable = nullptr; 
+    this->state.runnable.store(nullptr, std::memory_order_release);
+    while (this->active_workers.load(std::memory_order_acquire) > 0) {
+        // 等待已经读到旧 runnable 的 worker 离开当前任务状态
+    }
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
@@ -248,6 +264,47 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+
+    this->_killed = false;
+    this->state.runnable.store(nullptr);
+    this->state.num_total_tasks = 0;
+    this->state.next_task_id.store(0);
+    this->state.completed_tasks.store(0);
+
+    for (int i = 0; i < num_threads; i++) {
+        workers.emplace_back([this]() {
+            while(true) {
+                // 尝试领任务
+                std::unique_lock<std::mutex> lock(this->_mutex);
+
+                // 如果没活干且还没被杀掉，睡觉去
+                this->_cv_worker.wait(lock, [this]() {
+                    return (this->state.next_task_id.load() < this->state.num_total_tasks) || this->_killed;
+                });
+                if (this->_killed) break; 
+                
+                // 抢一个 ID
+                int task_id = this->state.next_task_id++;
+                IRunnable* r = this->state.runnable.load();
+                int total = this->state.num_total_tasks;
+
+                // 干活前解锁
+                lock.unlock();
+
+                r->runTask(task_id, total);
+                
+                // 汇报进度
+                lock.lock();
+                this->state.completed_tasks++;
+                
+                // 如果我是最后一个干完的，通知老板
+                if (this->state.completed_tasks == total) {
+                    this->_cv_main.notify_all();
+                }
+                lock.unlock();
+            }
+        });
+    }
 }
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
@@ -257,6 +314,14 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    {
+        std::lock_guard<std::mutex> lock(this->_mutex);
+        this->_killed = true;
+    }
+    this->_cv_worker.notify_all(); // 唤醒所有线程
+    for (auto& t : workers) {
+        t.join();
+    }
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
@@ -268,9 +333,25 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     // tasks sequentially on the calling thread.
     //
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    if (num_total_tasks <= 0) {
+        return;
     }
+
+    std::unique_lock<std::mutex> lock(this->_mutex);
+    
+    // 准备新任务的状态
+    this->state.runnable.store(runnable);
+    this->state.num_total_tasks = num_total_tasks;
+    this->state.next_task_id.store(0);
+    this->state.completed_tasks.store(0);
+    // 唤醒所有睡着的工人
+    this->_cv_worker.notify_all();
+    // 方案一 - 干等
+    // (. , .)
+    this->_cv_main.wait(lock, [this, num_total_tasks]() {
+        return this->state.completed_tasks.load() == num_total_tasks;
+    });
+    this->state.runnable.store(nullptr);
 }
 
 TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
