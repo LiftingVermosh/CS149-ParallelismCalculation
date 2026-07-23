@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <getopt.h>
 
 #include "CycleTimer.h"
 
@@ -16,7 +17,7 @@ using namespace std;
 // Main compute functions
 extern void kMeansThread(double *data, double *clusterCentroids,
                       int *clusterAssignments, int M, int N, int K,
-                      double epsilon);
+                      double epsilon, int numThreads, int parallelMode);
 extern double dist(double *x, double *y, int nDim);
 
 // Utilities
@@ -77,7 +78,7 @@ void initCentroids(double *clusterCentroids, int K, int N) {
   }
 }
 
-int main() {
+int main(int argc, char** argv) {
   srand(SEED);
 
   int M, N, K;
@@ -86,6 +87,37 @@ int main() {
   double *data;
   double *clusterCentroids;
   int *clusterAssignments;
+  int numThreads = 1;
+  int parallelMode = 0; // 0: assignments only, 1: full
+  string modeName = "assignments";
+  int opt;
+  while ((opt = getopt(argc, argv, "t:m:")) != -1) {
+    switch (opt) {
+      case 't':
+        numThreads = atoi(optarg);
+        break;
+      case 'm':
+        modeName = string(optarg);
+        if (modeName == "assignments" || modeName == "assignment" ||
+            modeName == "assign") {
+          parallelMode = 0;
+          modeName = "assignments";
+        } else if (modeName == "full") {
+          parallelMode = 1;
+        } else {
+          fprintf(stderr, "Unknown mode: %s\n", optarg);
+          fprintf(stderr,
+                  "Usage: %s [-t numThreads] [-m assignments|full]\n",
+                  argv[0]);
+          exit(EXIT_FAILURE);
+        }
+        break;
+      default:
+        fprintf(stderr, "Usage: %s [-t numThreads] [-m assignments|full]\n",
+                argv[0]);
+        exit(EXIT_FAILURE);
+    }
+  }
 
   // NOTE: we will grade your submission using the data in data.dat
   // which is read by this function
@@ -127,15 +159,16 @@ int main() {
   //           &K, &epsilon);
   */
 
-  printf("Running K-means with: M=%d, N=%d, K=%d, epsilon=%f\n", M, N,
-         K, epsilon);
+  printf("Running K-means with: M=%d, N=%d, K=%d, epsilon=%f, Threads=%d, Mode=%s\n",
+         M, N, K, epsilon, numThreads, modeName.c_str());
 
   // Log the starting state of the algorithm
   logToFile("./logs/start.log", SAMPLE_RATE, data, clusterAssignments,
             clusterCentroids, M, N, K);
 
   double startTime = CycleTimer::currentSeconds();
-  kMeansThread(data, clusterCentroids, clusterAssignments, M, N, K, epsilon);
+  kMeansThread(data, clusterCentroids, clusterAssignments, M, N, K, epsilon,
+               numThreads, parallelMode);
   double endTime = CycleTimer::currentSeconds();
   printf("[Total Time]: %.3f ms\n", (endTime - startTime) * 1000);
 
