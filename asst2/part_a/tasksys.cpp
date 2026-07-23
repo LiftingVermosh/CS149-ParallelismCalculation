@@ -1,5 +1,6 @@
 #include "tasksys.h"
-
+#include <thread>
+#include <vector>
 
 IRunnable::~IRunnable() {}
 
@@ -55,6 +56,7 @@ TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads): ITaskSystem(n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    this->num_threads = num_threads;
 }
 
 TaskSystemParallelSpawn::~TaskSystemParallelSpawn() {}
@@ -68,8 +70,34 @@ void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
     // tasks sequentially on the calling thread.
     //
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    // Init
+    int call_max_thread_nums = std::min(this->num_threads, num_total_tasks);
+    std::vector<std::thread> workers;
+
+    // Allocate
+    for(int i = 0; i < call_max_thread_nums; ++i) {
+        
+        // /* 分块 */ 
+        // workers.emplace_back([&, i, call_max_thread_nums]() {
+        //     int tasks_per_thread = num_total_tasks / call_max_thread_nums;  // Block Size
+        //     int start = i * tasks_per_thread;                               // Start idx
+        //     int end = (tasks_per_thread * (i + 1)) >= num_total_tasks ? 
+        //                 num_total_tasks : tasks_per_thread * (i + 1);       // End idx 
+        //     for(int j = start; j < end; ++j) {
+        //         runnable->runTask(j, num_total_tasks);
+        //     }
+        // });
+
+        /* 跨步 */
+        workers.emplace_back([&, i, call_max_thread_nums]() {
+            for(int j = i; j < num_total_tasks; j += call_max_thread_nums) {
+                runnable->runTask(j, num_total_tasks);
+            }
+        });
+    }
+
+    for (auto& t : workers) {   // std::thread& t : workers
+        t.join();
     }
 }
 
