@@ -27,7 +27,7 @@ if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 # 文件名 Example : perf_log_20231027_153000.txt
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_file_path = os.path.join(LOG_DIR, f"perf_log_{timestamp}.txt")
+log_file_path = os.path.join(LOG_DIR, f"perf_log_{timestamp}.log")
 log_file = open(log_file_path, "w", encoding='utf-8')
 
 def log_print(message):
