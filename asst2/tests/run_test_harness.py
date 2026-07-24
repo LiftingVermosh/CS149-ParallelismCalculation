@@ -4,6 +4,10 @@ import re
 import subprocess
 import multiprocessing
 
+# 26.07.24 - Update 4 logging 
+import os
+from datetime import datetime
+
 STUDENT_BINARY_NAME = "runtasks"
 
 if platform.system() == 'Darwin':
@@ -17,9 +21,24 @@ else:
     else:
         REFERENCE_BINARY_NAME = "runtasks_ref_linux"
 
+# Logging config
+LOG_DIR = "./logs"
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+# 文件名 Example : perf_log_20231027_153000.txt
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_file_path = os.path.join(LOG_DIR, f"perf_log_{timestamp}.txt")
+log_file = open(log_file_path, "w", encoding='utf-8')
+
+def log_print(message):
+    """同时打印到终端并写入日志文件"""
+    print(message)
+    log_file.write(message + "\n")
+    log_file.flush() 
+
 REFERENCE_BINARY_NAME = "runtasks_ref"
-print(REFERENCE_BINARY_NAME)
-print(platform.system(), platform.machine())
+log_print(REFERENCE_BINARY_NAME)
+log_print(f'{platform.system()}, {platform.machine()}')
 TASKSYS_DEFAULT_NUM_THREADS = multiprocessing.cpu_count()
 UNSPECIFIED_NUM_THREADS = -1
 
@@ -76,39 +95,39 @@ def run_test(cmd, is_reference):
                 runtime = float(m.group(2))
                 runtimes[implementation] = [runtime]
     except Exception as e:
-        print(e)
-        print("%s solution failed correctness check!" % ("REFERENCE" if is_reference else "STUDENT"))
+        log_print(e)
+        log_print("%s solution failed correctness check!" % ("REFERENCE" if is_reference else "STUDENT"))
     return runtimes
 
 def pretty_print(test_name, runtimes):
-    print("Results for: %s" % test_name)
+    log_print("Results for: %s" % test_name)
     for implementation in LIST_OF_IMPLEMENTATIONS_ORIG:
         if implementation in runtimes:
-            print("%s\t%.3f" % (implementation, runtimes[implementation]))
+            log_print("%s\t%.3f" % (implementation, runtimes[implementation]))
 
 def pretty_print_with_comparison(test_name, runtimes, perf_threshold, impl_perf_ok):
-    print("Results for: %s" % test_name)
+    log_print("Results for: %s" % test_name)
     
-    print("%s%s%sPERF?" % (" " * 40, "{:<10}".format(AUTHORS[0]), "{:<12}".format(AUTHORS[1])))
+    header = "%s%s%sPERF?" % (" " * 40, "{:<10}".format(AUTHORS[0]), "{:<12}".format(AUTHORS[1]))
+    log_print(header)
+    
     for impl in LIST_OF_IMPLEMENTATIONS:
         student_impl = AUTHORS[0] + " " + impl 
         ref_impl = AUTHORS[1] + " " + impl 
         student_time = runtimes[student_impl] if student_impl in runtimes else "Missing"
         ref_time = runtimes[ref_impl] if ref_impl in runtimes else "Missing"
-
         try:
             relative_perf = student_time / ref_time
+            # Check the threshold
+            perf_ok = relative_perf < perf_threshold
+            feedback = "(OK)" if perf_ok else "(NOT OK)"
+            if not perf_ok:
+                impl_perf_ok[impl] = False
+            
+            line = "{:<40}{:<10.3f}{:<12.3f}{:.2f}  {}".format(impl, student_time, ref_time, relative_perf, feedback)
+            log_print(line)
         except:
             continue
-
-        # Check the threshold
-        perf_ok = relative_perf < perf_threshold
-        feedback = "(OK)" if perf_ok else "(NOT OK)"
-
-        if not perf_ok:
-            impl_perf_ok[impl] = False
-
-        print("{:<40}{:<10}{:<12}{:.2f}  {}".format(impl, student_time, ref_time, relative_perf, feedback))
 
 
 
@@ -145,12 +164,12 @@ if __name__ == '__main__':
             PERF_THRESHOLD = 1.5 # Relax threshold for taskgraph
             test_names_and_num_threads.append( (x[0] + "_async", num_threads) )
 
-    print("==============================================================="
+    log_print("==============================================================="
           "=================")
-    print("Running task system grading harness... (%d total tests)" % len(test_names_and_num_threads))
-    print("  - Detected CPU with %d execution contexts" % multiprocessing.cpu_count())
-    print("  - Task system configured to use at most %d threads" % args.num_threads)
-    print("==============================================================="
+    log_print("Running task system grading harness... (%d total tests)" % len(test_names_and_num_threads))
+    log_print("  - Detected CPU with %d execution contexts" % multiprocessing.cpu_count())
+    log_print("  - Task system configured to use at most %d threads" % args.num_threads)
+    log_print("==============================================================="
           "=================")
 
     runtimes_of_test = {}
@@ -159,25 +178,25 @@ if __name__ == '__main__':
     # run all tests
     for (test_name, num_threads) in test_names_and_num_threads:
         
-        print("==============================================================="
+        log_print("==============================================================="
               "=================")
-        print("Executing test: %s..." %  test_name)
+        log_print("Executing test: %s..." %  test_name)
 
         # Use the right binary for OSX / Linux
         if platform.system() == 'Darwin':
             # distinguish x86 and ARM
             if platform.machine() == "arm64":
-                print("Reference binary: ./runtasks_ref_osx_arm")
+                log_print("Reference binary: ./runtasks_ref_osx_arm")
                 ref_cmd = "./%s_osx_arm -n %d" % (REFERENCE_BINARY_NAME, num_threads);
             else:
-                print("Reference binary: ./runtasks_ref_osx_x86")
+                log_print("Reference binary: ./runtasks_ref_osx_x86")
                 ref_cmd = "./%s_osx_x86 -n %d" % (REFERENCE_BINARY_NAME, num_threads);
         else:
             if platform.machine() == "aarch64":
-                print("Reference binary: ./runtasks_ref_linux_arm")
+                log_print("Reference binary: ./runtasks_ref_linux_arm")
                 ref_cmd = "./%s_linux_arm -n %d" % (REFERENCE_BINARY_NAME, num_threads);
             else:
-                print("Reference binary: ./runtasks_ref_linux")
+                log_print("Reference binary: ./runtasks_ref_linux")
                 ref_cmd = "./%s_linux -n %d" % (REFERENCE_BINARY_NAME, num_threads);
         student_cmd = "./%s -n %d" % (STUDENT_BINARY_NAME, num_threads);
 
@@ -199,10 +218,12 @@ if __name__ == '__main__':
         runtimes_of_test[test_name] = all_runtimes
 
     # Compare student's implementation against reference
-    print("==============================================================="
+    log_print("==============================================================="
           "=================")
-    print("Overall performance results")
+    log_print("Overall performance results")
     for impl in LIST_OF_IMPLEMENTATIONS:
         final_feedback = "All passed Perf" if impl_perf_ok[impl] else "Perf did not pass all tests"
-        print("{:<40}: {}".format(impl, final_feedback))
+        log_print("{:<40}: {}".format(impl, final_feedback))
+
+    log_file.close()
 
