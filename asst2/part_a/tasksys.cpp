@@ -265,6 +265,7 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     // (requiring changes to tasksys.h).
     //
 
+    this->num_threads = num_threads;
     this->_killed = false;
     this->state.runnable.store(nullptr);
     this->state.num_total_tasks = 0;
@@ -290,17 +291,29 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
                 // int total = this->state.num_total_tasks;
 
                 // 我要打十个
-                int total = this->state.num_total_tasks;
-                IRunnable* r = this->state.runnable.load();
+                // int total = this->state.num_total_tasks;
+                // IRunnable* r = this->state.runnable.load();
 
+                // int start_id = this->state.next_task_id;
+                // int end_id = std::min(total, start_id + 10);
+                // this->state.next_task_id = end_id;
+
+                // 启发式调度
+                int total = this->state.num_total_tasks;
+                int remaining = total - this->state.next_task_id;
+                IRunnable* r = this->state.runnable.load();
+                
+                // 计算动态块大小：剩余任务 / (线程数的 2 倍)
+                int chunk_size = std::max(1, remaining / (2 * this->num_threads));
+                
                 int start_id = this->state.next_task_id;
-                int end_id = std::min(total, start_id + 10);
+                int end_id = std::min(total, start_id + chunk_size);
                 this->state.next_task_id = end_id;
 
                 // 干活前解锁
                 lock.unlock();
 
-                for(int i = start_id; i < end_id; ++i) r->runTask(i, total);
+                for(int j = start_id; j < end_id; ++j) r->runTask(j, total);
                 
                 // 汇报进度
                 lock.lock();
@@ -362,9 +375,32 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     // });
 
     // 方案二 - 主线程帮忙
+    // while (this->state.next_task_id < num_total_tasks) {
+    //     int start_id = this->state.next_task_id;
+    //     int end_id = std::min(num_total_tasks, start_id + 10);
+    //     this->state.next_task_id = end_id;
+        
+    //     // 领到任务后解锁
+    //     lock.unlock(); 
+    //     for (int i = start_id; i < end_id; ++i) runnable->runTask(i, num_total_tasks);
+    //     lock.lock(); 
+    //     // 执行完后更新完成数
+    //     this->state.completed_tasks += (end_id - start_id);
+    // }
+    // // 注意主线程这里不需要 notify_all，因为工人都在抢活
+    // // 或者如果主线程是最后一个干完的，逻辑上也不需要唤醒自己
+
+    // this->_cv_main.wait(lock, [this, num_total_tasks]() {
+    //     return this->state.completed_tasks == num_total_tasks;
+    // });
+
+    // 方案三 - 主线程帮忙 & 启发式调度
+    int n_threads = this->num_threads + 1; // 包含主线程自己
     while (this->state.next_task_id < num_total_tasks) {
+        int remaining = num_total_tasks - this->state.next_task_id;
+        int chunk_size = std::max(1, remaining / (2 * n_threads));
         int start_id = this->state.next_task_id;
-        int end_id = std::min(num_total_tasks, start_id + 10);
+        int end_id = std::min(num_total_tasks, start_id + chunk_size);
         this->state.next_task_id = end_id;
         
         // 领到任务后解锁
@@ -374,12 +410,11 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
         // 执行完后更新完成数
         this->state.completed_tasks += (end_id - start_id);
     }
-    // 注意主线程这里不需要 notify_all，因为工人都在抢活
-    // 或者如果主线程是最后一个干完的，逻辑上也不需要唤醒自己
 
     this->_cv_main.wait(lock, [this, num_total_tasks]() {
         return this->state.completed_tasks == num_total_tasks;
     });
+
 
     this->state.runnable.store(nullptr);
 }

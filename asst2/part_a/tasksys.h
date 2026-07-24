@@ -97,6 +97,7 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         std::condition_variable _cv_worker;
         std::condition_variable _cv_main;
         bool _killed;
+        int num_threads;
 };
 
 #endif
