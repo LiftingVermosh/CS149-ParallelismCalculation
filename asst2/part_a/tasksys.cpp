@@ -284,18 +284,27 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
                 if (this->_killed) break; 
                 
                 // 抢一个 ID
-                int task_id = this->state.next_task_id++;
-                IRunnable* r = this->state.runnable.load();
+                // NOTE: 貌似抢一个会导致性能开销过不去
+                // int task_id = this->state.next_task_id++;
+                // IRunnable* r = this->state.runnable.load();
+                // int total = this->state.num_total_tasks;
+
+                // 我要打十个
                 int total = this->state.num_total_tasks;
+                IRunnable* r = this->state.runnable.load();
+
+                int start_id = this->state.next_task_id;
+                int end_id = std::min(total, start_id + 10);
+                this->state.next_task_id = end_id;
 
                 // 干活前解锁
                 lock.unlock();
 
-                r->runTask(task_id, total);
+                for(int i = start_id; i < end_id; ++i) r->runTask(i, total);
                 
                 // 汇报进度
                 lock.lock();
-                this->state.completed_tasks++;
+                this->state.completed_tasks += (end_id - start_id);
                 
                 // 如果我是最后一个干完的，通知老板
                 if (this->state.completed_tasks == total) {
@@ -346,11 +355,32 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     this->state.completed_tasks.store(0);
     // 唤醒所有睡着的工人
     this->_cv_worker.notify_all();
-    // 方案一 - 干等
-    // (. , .)
+    // // 方案一 - 干等
+    // // (. , .)
+    // this->_cv_main.wait(lock, [this, num_total_tasks]() {
+    //     return this->state.completed_tasks.load() == num_total_tasks;
+    // });
+
+    // 方案二 - 主线程帮忙
+    while (this->state.next_task_id < num_total_tasks) {
+        int start_id = this->state.next_task_id;
+        int end_id = std::min(num_total_tasks, start_id + 10);
+        this->state.next_task_id = end_id;
+        
+        // 领到任务后解锁
+        lock.unlock(); 
+        for (int i = start_id; i < end_id; ++i) runnable->runTask(i, num_total_tasks);
+        lock.lock(); 
+        // 执行完后更新完成数
+        this->state.completed_tasks += (end_id - start_id);
+    }
+    // 注意主线程这里不需要 notify_all，因为工人都在抢活
+    // 或者如果主线程是最后一个干完的，逻辑上也不需要唤醒自己
+
     this->_cv_main.wait(lock, [this, num_total_tasks]() {
-        return this->state.completed_tasks.load() == num_total_tasks;
+        return this->state.completed_tasks == num_total_tasks;
     });
+
     this->state.runnable.store(nullptr);
 }
 
