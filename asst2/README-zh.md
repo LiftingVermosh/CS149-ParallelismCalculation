@@ -84,12 +84,12 @@ usage: run_test_harness.py [-h] [-n NUM_THREADS]
 运行任务系统性能测试
 
 optional arguments:
-  -h, --help            显示此帮助信息并退出
+  -h, --help            # 显示此帮助信息并退出
   -n NUM_THREADS, --num_threads NUM_THREADS
-                        任务系统可以使用的最大线程数（默认为16）
+                        # 任务系统可以使用的最大线程数（默认为16）
   -t TEST_NAMES [TEST_NAMES ...], --test_names TEST_NAMES [TEST_NAMES ...]
-                        要运行的测试列表
-  -a, --run_async       运行异步测试
+                        # 要运行的测试列表
+  -a, --run_async       # 运行异步测试
 ```
 
 它会产生一份详细的性能报告，如下所示：
@@ -233,6 +233,7 @@ __在此步骤中，请实现类 `TaskSystemParallelThreadPoolSleeping`。__
 
 `runAsyncWithDeps()` 的第二个关键细节是其第三个参数：一个 `TaskID` 标识符向量，这些标识符必须引用先前使用 `runAsyncWithDeps()` 进行的批量任务启动。这个向量指定了当前批量任务启动中的任务依赖于哪些先前任务。__因此，只有当依赖向量中所有启动的任务都完成时，你的任务运行时才能开始执行当前批量任务启动中的任何任务！__ 例如，考虑以下示例：
 
+```cpp
     std::vector<TaskID> noDeps;  // 空向量
     std::vector<TaskID> depOnA;
     std::vector<TaskID> depOnBC;
@@ -249,6 +250,7 @@ __在此步骤中，请实现类 `TaskSystemParallelThreadPoolSleeping`。__
 
     TaskID launchD = t->runAsyncWithDeps(taskD, 32, depOnBC);
     t->sync();
+```
 
 上面的代码中包含四次批量任务启动（taskA：128个任务，taskB：2个任务，taskC：6个任务，taskD：32个任务）。注意，taskB和taskC的启动依赖于taskA。taskD的批量启动（`launchD`）依赖于 `launchB` 和 `launchC` 的结果。因此，虽然你的任务运行时可以按任意顺序（包括并行）处理与 `launchB` 和 `launchC` 关联的任务，但这些启动中的所有任务必须在 `launchA` 的任务完成后才能开始执行，并且它们必须完成，然后你的运行时才能开始执行 `launchD` 中的任何任务。
 
