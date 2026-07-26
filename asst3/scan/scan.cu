@@ -27,6 +27,59 @@ static inline int nextPow2(int n) {
     return n;
 }
 
+/* 上扫函数 */ 
+__global__ void upsweep_kernel(int N, int two_d, int *data) {
+    int index = blockDim.x * blockIdx.x + threadIdx.x;
+
+    int two_d_plus_1 = 2 * two_d;
+    
+    if (index < N / two_d_plus_1) {
+        int i = index * two_d_plus_1;    // 计算该线程对应的数组下标
+        data[i + two_d_plus_1 - 1] += data[i + two_d - 1];
+    }
+}
+
+/* 下扫函数 */
+__global__ void downsweep_kernel(int N, int two_d, int *data) {
+    int index = blockDim.x * blockIdx.x + threadIdx.x;
+
+    int two_d_plus_1 = 2 * two_d;
+    
+    if (index < N / two_d_plus_1) {
+        int i = index * two_d_plus_1;    // 计算该线程对应的数组下标
+
+        int t = data[i + two_d - 1];
+        
+        data[i+two_d-1] = data[i+two_d_plus_1-1];
+        data[i+two_d_plus_1-1] += t;
+    }
+}
+
+/* 预处理相等函数 */
+__global__ void map_kernel(int length, int *inputs, int *flags, int rounded_length) {
+    int index = blockDim.x * blockIdx.x + threadIdx.x;
+
+    // 只处理有效的数据对
+    if(index < length - 1) {
+        flags[index] = (inputs[index] == inputs[index + 1]) ? 1 : 0;
+    } 
+    // 超过有效范围的部分必须显式设为 0，否则 Scan 结果会错
+    else if (index < rounded_length) {
+        flags[index] = 0;
+    }
+}
+
+/* 写入函数 */
+__global__ void scatter_kernel(int N, int* flags, int* indices, int* output) {
+    int index = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (index < N - 1) {
+        if (flags[index] == 1) {
+            output[indices[index]] = index;
+        }
+    }
+}
+
 // exclusive_scan --
 //
 // Implementation of an exclusive scan on global memory array `input`,
@@ -53,8 +106,23 @@ void exclusive_scan(int* input, int N, int* result)
     // on the CPU.  Your implementation will need to make multiple calls
     // to CUDA kernel functions (that you must write) to implement the
     // scan.
+    int rounded_length = nextPow2(N);
 
+    // Upsweep
+    for(int two_d = 1; two_d <= rounded_length / 2; two_d *= 2) {
+        int thread_num = rounded_length / (2 * two_d);
+        int blocks = (thread_num + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
 
+        upsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(rounded_length, two_d, result);
+    }
+    cudaMemset(result + rounded_length - 1, 0, sizeof(int));
+    // Downsweep
+    for(int two_d = rounded_length / 2; two_d >= 1; two_d /= 2) {
+        int thread_num = rounded_length / (2 * two_d);
+        int blocks = (thread_num + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+        downsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(rounded_length, two_d, result);
+    }
 }
 
 
@@ -161,7 +229,36 @@ int find_repeats(int* device_input, int length, int* device_output) {
     // must ensure that the results of find_repeats are correct given
     // the actual array length.
 
-    return 0; 
+    int rounded_length = nextPow2(length);
+
+    int *device_flags;
+    int *device_indices;
+
+    cudaMalloc(&device_flags, sizeof(int) * rounded_length);
+    cudaMalloc(&device_indices, sizeof(int) * rounded_length);
+
+    int blocks = (rounded_length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+    map_kernel<<<blocks, THREADS_PER_BLOCK>>>(length, device_input, device_flags, rounded_length);
+
+    // 注意原生 exclusive scan 是原位操作需要 copy
+    cudaMemcpy(device_indices, device_flags, rounded_length * sizeof(int), cudaMemcpyDeviceToDevice);
+
+    exclusive_scan(device_flags, rounded_length, device_indices);
+
+    scatter_kernel<<<blocks, THREADS_PER_BLOCK>>>(length, device_flags, device_indices, device_output);
+    
+    
+    int last_flag, last_index;
+    cudaMemcpy(&last_flag, device_flags + length - 2, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&last_index, device_indices + length - 2, sizeof(int), cudaMemcpyDeviceToHost);
+    int total_repeats = last_flag + last_index;
+    
+    cudaDeviceSynchronize(); 
+    cudaFree(device_flags);
+    cudaFree(device_indices);
+
+    return total_repeats;
 }
 
 
