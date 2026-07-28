@@ -56,6 +56,20 @@ __constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
 #include "noiseCuda.cu_inl"
 #include "lookupColor.cu_inl"
 
+/* Help Functions */
+
+// 返回是否在圆内
+__device__ bool pixelInCircle(float dist, float rad) {
+    return dist <= rad;
+}
+
+
+// 计算指定点间的距离
+__device__ __inline__ float sqDist(float2 p1, float3 p2) {
+    float dx = p1.x - p2.x;
+    float dy = p1.y - p2.y;
+    return dx * dx + dy * dy;
+}
 
 // kernelClearImageSnowflake -- (CUDA device code)
 //
@@ -427,6 +441,51 @@ __global__ void kernelRenderCircles() {
     }
 }
 
+
+// kernelRenderPixels -- (CUDA device code)
+//
+// Each thread renders a pixel. Note that written by pixel avoiding write conflict
+__global__ void kernelRenderPixels() {
+    int pixelX = blockDim.x * blockIdx.x + threadIdx.x;
+    int pixelY = blockDim.y * blockIdx.y + threadIdx.y;
+
+    int imageHeight = cuConstRendererParams.imageHeight;
+    int imageWidth = cuConstRendererParams.imageWidth;
+    float invHeight = 1.f / imageHeight;
+    float invWidth = 1.f / imageWidth;
+
+    // 边界检查
+    if(pixelX >= imageWidth || pixelY >= imageHeight) return;
+
+    float4 pixelColor = make_float4(0.f, 0.f, 0.f, 1.f);
+    float *imageData = cuConstRendererParams.imageData;
+
+    float2 pixelCenterNorm = make_float2(
+        invWidth * (static_cast<float>(pixelX) + 0.5f),
+        invHeight * (static_cast<float>(pixelY) + 0.5f)
+    );
+
+    // 读取背景颜色
+    int imgIdx = 4 * (pixelY * imageWidth + pixelX);
+    float4* imgPtr = (float4*)(&imageData[imgIdx]);
+    float4 localColor = *imgPtr; 
+
+    // 遍历所有圆
+    int numCircles = cuConstRendererParams.numCircles;
+    for(int i = 0; i < numCircles; ++i) {
+        float3 p = *(float3*)(&cuConstRendererParams.position[i * 3]); 
+        float rad = cuConstRendererParams.radius[i];
+
+        float distL2 = sqDist(pixelCenterNorm, p);
+
+        if(pixelInCircle(distL2, rad * rad)) {
+            shadePixel(i, pixelCenterNorm, p, &localColor);
+        }
+    }
+
+    *imgPtr = localColor;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -637,9 +696,24 @@ void
 CudaRenderer::render() {
 
     // 256 threads per block is a healthy number
-    dim3 blockDim(256, 1);
-    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+    // dim3 blockDim(256, 1);
+    // dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
 
-    kernelRenderCircles<<<gridDim, blockDim>>>();
+    // kernelRenderCircles<<<gridDim, blockDim>>>();
+
+    // Data Parallel -> Spatial Partitioning
+
+    int imageWidth = image->width;
+    int imageHeight = image->height;
+
+    dim3 blockDim(16, 16);
+    dim3 gridDim(
+        (imageWidth + blockDim.x - 1) / blockDim.x, 
+        (imageHeight + blockDim.y - 1) / blockDim.y
+    );
+
+    kernelRenderPixels<<<gridDim, blockDim>>>();
+
+
     cudaDeviceSynchronize();
 }
