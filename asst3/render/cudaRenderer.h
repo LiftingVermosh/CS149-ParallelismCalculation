@@ -20,6 +20,15 @@ class CudaRenderer : public CircleRenderer {
   float* cudaDeviceRadius;
   float* cudaDeviceImageData;
 
+  /* Updated 4 Version 2 */
+  int* hostCircleIndices;   // 存储圆索引的 Flatten 数组
+  int* hostTileCounts;      // 每个 Tile 包含的圆数量
+  int* hostTileOffsets;     // 每个 Tile 在索引数组中的起始偏移
+  // 对应的 GPU 显存
+  int* deviceCircleIndices;
+  int* deviceTileCounts;    
+  int* deviceTileOffsets;
+
  public:
   CudaRenderer();
   virtual ~CudaRenderer();
@@ -40,6 +49,9 @@ class CudaRenderer : public CircleRenderer {
 
   void shadePixel(int circleIndex, float pixelCenterX, float pixelCenterY,
                   float px, float py, float pz, float* pixelData);
+
+  /* Updated 4 Version 2 */
+  void buildTileCircleMapping();
 };
 
 #endif

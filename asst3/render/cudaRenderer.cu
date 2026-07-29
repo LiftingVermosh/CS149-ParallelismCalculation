@@ -50,6 +50,8 @@ __constant__ float  cuConstNoise1DValueTable[256];
 #define COLOR_MAP_SIZE 5
 __constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
 
+/* Self-use MARCO */
+#define TILE_NUM 16
 
 // including parts of the CUDA code from external files to keep this
 // file simpler and to seperate code that should not be modified
@@ -441,6 +443,7 @@ __global__ void kernelRenderCircles() {
     }
 }
 
+/* Task 3 realizes Version 1 */ 
 
 // kernelRenderPixels -- (CUDA device code)
 //
@@ -486,6 +489,59 @@ __global__ void kernelRenderPixels() {
     *imgPtr = localColor;
 }
 
+/* Task 3 realizes Version 2 */
+__global__ void kernelRenderPixelsWithMapping(
+        int* tileCounts, 
+        int* tileOffsets, 
+        int* circleIndices
+    ) {
+    int pixelX = blockDim.x * blockIdx.x + threadIdx.x;
+    int pixelY = blockDim.y * blockIdx.y + threadIdx.y;
+
+    int tileIdx = blockIdx.y * gridDim.x + blockIdx.x;
+    int startOffset = tileOffsets[tileIdx];
+    int count = tileCounts[tileIdx];
+
+    int imageHeight = cuConstRendererParams.imageHeight;
+    int imageWidth = cuConstRendererParams.imageWidth;
+    float invHeight = 1.f / imageHeight;
+    float invWidth = 1.f / imageWidth;
+
+    // 边界检查
+    if(pixelX >= imageWidth || pixelY >= imageHeight) return;
+
+    float4 pixelColor = make_float4(0.f, 0.f, 0.f, 1.f);
+    float *imageData = cuConstRendererParams.imageData;
+
+    float2 pixelCenterNorm = make_float2(
+        invWidth * (static_cast<float>(pixelX) + 0.5f),
+        invHeight * (static_cast<float>(pixelY) + 0.5f)
+    );
+
+    // 读取背景颜色
+    int imgIdx = 4 * (pixelY * imageWidth + pixelX);
+    float4* imgPtr = (float4*)(&imageData[imgIdx]);
+    float4 localColor = *imgPtr; 
+
+    // 改进点：采用预处理映射表
+    for (int i = 0; i < count; i++) {
+        int circleIdx = circleIndices[startOffset + i];
+        
+        float3 p = *(float3*)(&cuConstRendererParams.position[circleIdx * 3]);
+        float rad = cuConstRendererParams.radius[circleIdx];
+        
+        float distL2 = sqDist(pixelCenterNorm, p);
+
+        // 分块在不等于像素在，所以还要 check
+        if (pixelInCircle(distL2, rad * rad)) {
+            shadePixel(circleIdx, pixelCenterNorm, p, &localColor);
+        }
+    }
+
+    *imgPtr = localColor;
+}
+
+
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -503,6 +559,14 @@ CudaRenderer::CudaRenderer() {
     cudaDeviceColor = NULL;
     cudaDeviceRadius = NULL;
     cudaDeviceImageData = NULL;
+
+    /* Updated 4 Version 2 */
+    hostCircleIndices = NULL;   
+    hostTileCounts = NULL;     
+    hostTileOffsets = NULL;    
+    deviceCircleIndices = NULL;
+    deviceTileCounts = NULL;    
+    deviceTileOffsets = NULL;
 }
 
 CudaRenderer::~CudaRenderer() {
@@ -524,6 +588,19 @@ CudaRenderer::~CudaRenderer() {
         cudaFree(cudaDeviceColor);
         cudaFree(cudaDeviceRadius);
         cudaFree(cudaDeviceImageData);
+    }
+
+    /* Update 4 Version 2 */
+    if (hostCircleIndices) {
+        delete [] hostCircleIndices;
+        delete [] hostTileCounts;
+        delete [] hostTileOffsets;
+    }
+
+    if(deviceCircleIndices) {
+        cudaFree(deviceCircleIndices);
+        cudaFree(deviceTileCounts);
+        cudaFree(deviceTileOffsets);
     }
 }
 
@@ -634,6 +711,20 @@ CudaRenderer::setup() {
 
     cudaMemcpyToSymbol(cuConstColorRamp, lookupTable, sizeof(float) * 3 * COLOR_MAP_SIZE);
 
+    /* Update 4 Version 2 */
+    int gridX = (image->width + TILE_NUM - 1) / TILE_NUM;
+    int gridY = (image->height + TILE_NUM - 1) / TILE_NUM;
+    int numTiles = gridX * gridY;
+
+    // 分配 Tile 统计信息空间
+    hostTileCounts = new int[numTiles];
+    hostTileOffsets = new int[numTiles];
+    cudaMalloc(&deviceTileCounts, sizeof(int) * numTiles);
+    cudaMalloc(&deviceTileOffsets, sizeof(int) * numTiles);
+    
+    // 因为 `CircleIndices` 的大小取决于圆的重叠情况，所以初始化 `deviceCircleIndices` 为 NULL
+    // 交由 `render()` 动态分配
+    deviceCircleIndices = NULL;
 }
 
 // allocOutputImage --
@@ -692,9 +783,83 @@ CudaRenderer::advanceAnimation() {
     cudaDeviceSynchronize();
 }
 
+void CudaRenderer::buildTileCircleMapping() {
+    int gridX = (this->image->width + TILE_NUM - 1) / TILE_NUM;
+    int gridY = (this->image->height + TILE_NUM - 1) / TILE_NUM;
+
+    int numTiles = gridX * gridY;
+
+    memset(hostTileCounts, 0, sizeof(int) * numTiles);
+
+    struct Box { int minX, minY, maxX, maxY; };
+    std::vector<Box> circleBoxes(this->numCircles);
+
+
+    for (int i = 0; i < numCircles; i++) {
+        float3 p = *(float3*)(&this->position[3 * i]);
+        float rad = radius[i];
+        
+        // 计算圆在 Tile 坐标系下的范围
+        circleBoxes[i].minX = std::max(0        , static_cast<int>((p.x - rad) * this->image->width) / TILE_NUM);
+        circleBoxes[i].maxX = std::min(gridX - 1, static_cast<int>((p.x + rad) * this->image->width) / TILE_NUM);
+        circleBoxes[i].minY = std::max(0        , static_cast<int>((p.y - rad) * this->image->height) / TILE_NUM);
+        circleBoxes[i].maxY = std::min(gridY - 1, static_cast<int>((p.y + rad) * this->image->height) / TILE_NUM);
+        
+        for (int y = circleBoxes[i].minY; y <= circleBoxes[i].maxY; y++) {
+            for (int x = circleBoxes[i].minX; x <= circleBoxes[i].maxX; x++) {
+                hostTileCounts[y * gridX + x]++;
+            }
+        }
+    }
+
+    // 计算偏移量
+    int totalIndices = 0;
+    for (int i = 0; i < numTiles; i++) {
+        hostTileOffsets[i] = totalIndices;
+        totalIndices += hostTileCounts[i];
+    }
+
+    // 管理 CircleIndices 显存空间
+    static int currentIndicesCapacity = 0;
+    if (totalIndices > currentIndicesCapacity) {
+        
+        if (deviceCircleIndices) {
+            cudaFree(deviceCircleIndices);
+        }
+
+        if (hostCircleIndices) {
+            delete[] hostCircleIndices;
+        }
+
+        cudaMalloc(&deviceCircleIndices, sizeof(int) * totalIndices);
+        hostCircleIndices = new int[totalIndices];
+
+        currentIndicesCapacity = totalIndices;
+    }
+
+    // 第二趟扫描：填充索引
+    std::vector<int> tempOffsets(numTiles, 0);  // 一个临时的偏移数组来记录当前填到哪里了
+    for (int i = 0; i < numCircles; i++) {
+        for (int y = circleBoxes[i].minY; y <= circleBoxes[i].maxY; y++) {
+            for (int x = circleBoxes[i].minX; x <= circleBoxes[i].maxX; x++) {
+                int tileIdx = y * gridX + x;
+                int writePos = hostTileOffsets[tileIdx] + tempOffsets[tileIdx];
+                hostCircleIndices[writePos] = i;
+                tempOffsets[tileIdx]++;
+            }
+        }
+    }
+    
+    // 拷贝到 GPU
+    cudaMemcpy(deviceTileCounts, hostTileCounts, sizeof(int) * numTiles, cudaMemcpyHostToDevice);
+    cudaMemcpy(deviceTileOffsets, hostTileOffsets, sizeof(int) * numTiles, cudaMemcpyHostToDevice);
+    cudaMemcpy(deviceCircleIndices, hostCircleIndices, sizeof(int) * totalIndices, cudaMemcpyHostToDevice);
+}
+
 void
 CudaRenderer::render() {
 
+    // /* Original Version - Circle Unit Based */
     // 256 threads per block is a healthy number
     // dim3 blockDim(256, 1);
     // dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
@@ -703,17 +868,35 @@ CudaRenderer::render() {
 
     // Data Parallel -> Spatial Partitioning
 
+    // /* Improved Version #1 - Pixel Unit Based */
+    // int imageWidth = image->width;
+    // int imageHeight = image->height;
+
+    // dim3 blockDim(TILE_NUM, TILE_NUM);
+    // dim3 gridDim(
+    //     (imageWidth + blockDim.x - 1) / blockDim.x, 
+    //     (imageHeight + blockDim.y - 1) / blockDim.y
+    // );
+
+    // kernelRenderPixels<<<gridDim, blockDim>>>();
+
+    /* Improved Version #2 - Pixel Unit Based & Traverse Optimized */
+    buildTileCircleMapping();   // 建立映射
+
     int imageWidth = image->width;
     int imageHeight = image->height;
 
-    dim3 blockDim(16, 16);
+    dim3 blockDim(TILE_NUM, TILE_NUM);
     dim3 gridDim(
         (imageWidth + blockDim.x - 1) / blockDim.x, 
         (imageHeight + blockDim.y - 1) / blockDim.y
     );
 
-    kernelRenderPixels<<<gridDim, blockDim>>>();
-
+    kernelRenderPixelsWithMapping<<<gridDim, blockDim>>>(
+        deviceTileCounts, 
+        deviceTileOffsets, 
+        deviceCircleIndices
+    );
 
     cudaDeviceSynchronize();
 }
