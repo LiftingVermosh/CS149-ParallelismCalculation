@@ -29,6 +29,10 @@ class CudaRenderer : public CircleRenderer {
   int* deviceTileCounts;    
   int* deviceTileOffsets;
 
+  /* Updated 4 Version 3 */
+  int indicesCapacity;      // 空间预分配
+  int* deviceTempCounters;  // 临时计数器
+
  public:
   CudaRenderer();
   virtual ~CudaRenderer();

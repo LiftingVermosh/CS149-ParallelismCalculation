@@ -14,6 +14,11 @@
 #include "sceneLoader.h"
 #include "util.h"
 
+/* Include in Version 3 for exclusive scan */
+#include <thrust/scan.h>
+#include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
+
 ////////////////////////////////////////////////////////////////////////////////////////
 // Putting all the cuda kernels here
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -490,6 +495,11 @@ __global__ void kernelRenderPixels() {
 }
 
 /* Task 3 realizes Version 2 */
+
+// kernelRenderPixelsWithMapping -- (CUDA device code)
+//
+// Each thread renders a pixel. Note that written by pixel avoiding write conflict
+// Comapred with Version 1, we use preprocessing mapping (on cpu) here INSTEAD OF fully scan circles strategy
 __global__ void kernelRenderPixelsWithMapping(
         int* tileCounts, 
         int* tileOffsets, 
@@ -541,6 +551,97 @@ __global__ void kernelRenderPixelsWithMapping(
     *imgPtr = localColor;
 }
 
+/* Task 3 realizes Version 3 */
+
+// kernelCountCirclesPerTile -- (CUDA device code)
+//
+// 以圆为线程处理单位计算每个 Tile 包含的圆数
+__global__ void kernelCountCirclesPerTile(int* deviceTileCounts, int gridX, int gridY) {
+    // 当前线程处理圆的 id
+    int index = blockDim.x * blockIdx.x + threadIdx.x;
+
+    // 超过圆的个数
+    if(index >= cuConstRendererParams.numCircles) {
+        return;
+    }
+    
+    int imageWidth = cuConstRendererParams.imageWidth;
+    int imageHeight = cuConstRendererParams.imageHeight;
+    float3 p = *(float3*)(&cuConstRendererParams.position[3 * index]);
+    float rad = cuConstRendererParams.radius[index];
+    
+    // 计算圆在 Tile 坐标系下的范围
+    int minX = max(0        , static_cast<int>((p.x - rad) * imageWidth) / TILE_NUM);
+    int maxX = min(gridX - 1, static_cast<int>((p.x + rad) * imageWidth) / TILE_NUM);
+    int minY = max(0        , static_cast<int>((p.y - rad) * imageHeight) / TILE_NUM);
+    int maxY = min(gridY - 1, static_cast<int>((p.y + rad) * imageHeight) / TILE_NUM);
+    
+    for (int y = minY; y <= maxY; y++) {
+        for (int x = minX; x <= maxX; x++) {
+            int tileIdx = y * gridX + x;
+            atomicAdd(&deviceTileCounts[tileIdx], 1);  // 使用原子加法避免数据竞争
+        }
+    }
+}
+
+// kernelFillCircleIndices -- (CUDA device code)
+//
+// 以圆为线程处理单位写回 Flatten Array
+__global__ void kernelFillCircleIndices(
+        int* deviceTileOffsets,  int* deviceCircleIndices, 
+        int* deviceTempCounters, 
+        int gridX, int gridY
+    ){
+        int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (index >= cuConstRendererParams.numCircles) {
+            return;
+        }
+        
+        int imageWidth = cuConstRendererParams.imageWidth;
+        int imageHeight = cuConstRendererParams.imageHeight;
+        
+        float3 p = *(float3*)(&cuConstRendererParams.position[3 * index]);
+        float rad = cuConstRendererParams.radius[index];
+        
+        int minX = max(0, (int)((p.x - rad) * imageWidth) / TILE_NUM);
+        int maxX = min(gridX - 1, (int)((p.x + rad) * imageWidth) / TILE_NUM);
+        int minY = max(0, (int)((p.y - rad) * imageHeight) / TILE_NUM);
+        int maxY = min(gridY - 1, (int)((p.y + rad) * imageHeight) / TILE_NUM);
+        
+        for (int y = minY; y <= maxY; y++) {
+            for (int x = minX; x <= maxX; x++) {
+                int tileIdx = y * gridX + x;
+                // 原子操作获取当前圆在该 Tile 列表中的相对偏移
+                int entryIdx = atomicAdd(&deviceTempCounters[tileIdx], 1);
+                deviceCircleIndices[deviceTileOffsets[tileIdx] + entryIdx] = index;  // 写入绝对位置
+            }
+        }
+}
+
+// kernelSortTileIndices -- (CUDA device code)
+//
+// Alpha Blending 不满足交换律，因此需要确保每个 Tile 内部的圆索引是升序排列的
+__global__ void kernelSortTileIndices(int* tileCounts, int* tileOffsets, int* circleIndices, int numTiles) {
+    int tileIdx = blockIdx.y * gridDim.x + blockIdx.x;
+    if (tileIdx >= numTiles) return;
+
+    // 只允许 Block 内的第一个线程进行排序,否则 Race Condition 白排序
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        int start = tileOffsets[tileIdx];
+        int count = tileCounts[tileIdx];
+        
+        for (int i = 1; i < count; i++) {
+            int key = circleIndices[start + i];
+            int j = i - 1;
+            while (j >= 0 && circleIndices[start + j] > key) {
+                circleIndices[start + j + 1] = circleIndices[start + j];
+                j--;
+            }
+            circleIndices[start + j + 1] = key;
+        }
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////
 
@@ -601,6 +702,7 @@ CudaRenderer::~CudaRenderer() {
         cudaFree(deviceCircleIndices);
         cudaFree(deviceTileCounts);
         cudaFree(deviceTileOffsets);
+        cudaFree(deviceTempCounters);
     }
 }
 
@@ -725,6 +827,12 @@ CudaRenderer::setup() {
     // 因为 `CircleIndices` 的大小取决于圆的重叠情况，所以初始化 `deviceCircleIndices` 为 NULL
     // 交由 `render()` 动态分配
     deviceCircleIndices = NULL;
+    
+    /* Update 4 Version 3 */
+    // Compromise of dyamnic allocation
+    indicesCapacity = numCircles * 32; 
+    cudaMalloc(&deviceCircleIndices, sizeof(int) * indicesCapacity);
+    cudaMalloc(&deviceTempCounters, sizeof(int) * numTiles);
 }
 
 // allocOutputImage --
@@ -880,19 +988,80 @@ CudaRenderer::render() {
 
     // kernelRenderPixels<<<gridDim, blockDim>>>();
 
-    /* Improved Version #2 - Pixel Unit Based & Traverse Optimized */
-    buildTileCircleMapping();   // 建立映射
+    // /* Improved Version #2 - Pixel Unit Based & Traverse Optimized */
+    // buildTileCircleMapping();   // 建立映射
 
-    int imageWidth = image->width;
-    int imageHeight = image->height;
+    // int imageWidth = image->width;
+    // int imageHeight = image->height;
 
-    dim3 blockDim(TILE_NUM, TILE_NUM);
-    dim3 gridDim(
-        (imageWidth + blockDim.x - 1) / blockDim.x, 
-        (imageHeight + blockDim.y - 1) / blockDim.y
+    // dim3 blockDim(TILE_NUM, TILE_NUM);
+    // dim3 gridDim(
+    //     (imageWidth + blockDim.x - 1) / blockDim.x, 
+    //     (imageHeight + blockDim.y - 1) / blockDim.y
+    // );
+
+    // kernelRenderPixelsWithMapping<<<gridDim, blockDim>>>(
+    //     deviceTileCounts, 
+    //     deviceTileOffsets, 
+    //     deviceCircleIndices
+    // );
+
+    /* Improved Version #3 - Pure GPU Preprocess */
+    int gridX = (image->width + TILE_NUM - 1) / TILE_NUM;
+    int gridY = (image->height + TILE_NUM - 1) / TILE_NUM;
+    int numTiles = gridX * gridY;
+
+    // 清零计数器
+    cudaMemset(deviceTileCounts, 0, sizeof(int) * numTiles);
+
+    // 在圆视角下建立映射
+    dim3 blockDimCircle(256);
+    dim3 gridDimCircle((numCircles + blockDimCircle.x - 1) / blockDimCircle.x);
+    kernelCountCirclesPerTile<<<gridDimCircle, blockDimCircle>>>(deviceTileCounts, gridX, gridY);
+
+    // 前缀和计算
+    // v1 - 库函数
+    thrust::device_ptr<int> d_counts(deviceTileCounts);
+    thrust::device_ptr<int> d_offsets(deviceTileOffsets);
+
+    thrust::exclusive_scan(d_counts, d_counts + numTiles, d_offsets);
+    // TODO : v2 - 自实现前缀和
+
+    // 可容纳性检查
+    int totalIndices;
+    int lastOffset, lastCount;
+    // 获取最后一个 offset + 最后一个 count
+    cudaMemcpy(&lastOffset, deviceTileOffsets + numTiles - 1, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&lastCount, deviceTileCounts + numTiles - 1, sizeof(int), cudaMemcpyDeviceToHost);
+    totalIndices = lastOffset + lastCount;
+    // 如果当前容量不够，再重新分配
+    if (totalIndices > indicesCapacity) {
+        cudaFree(deviceCircleIndices);
+        indicesCapacity = 1.2f * totalIndices;
+        cudaMalloc(&deviceCircleIndices, sizeof(int) * indicesCapacity);
+    }
+
+    // 写回索引
+    cudaMemset(deviceTempCounters, 0, sizeof(int) * numTiles);
+    kernelFillCircleIndices<<<gridDimCircle, blockDimCircle>>>(
+        deviceTileOffsets, deviceCircleIndices, 
+        deviceTempCounters, 
+        gridX, gridY
     );
 
-    kernelRenderPixelsWithMapping<<<gridDim, blockDim>>>(
+    dim3 blockDimRender(TILE_NUM, TILE_NUM);
+    dim3 gridDimRender(gridX, gridY);
+
+    // 排序避免顺序错位
+    kernelSortTileIndices<<<gridDimRender, blockDimRender>>>(
+        deviceTileCounts, 
+        deviceTileOffsets, 
+        deviceCircleIndices, 
+        numTiles
+    );
+    
+    // 渲染同 Version 2 
+    kernelRenderPixelsWithMapping<<<gridDimRender, blockDimRender>>>(
         deviceTileCounts, 
         deviceTileOffsets, 
         deviceCircleIndices
