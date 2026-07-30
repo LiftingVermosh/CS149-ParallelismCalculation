@@ -1,5 +1,6 @@
 
-EXECUTABLE := render
+RENDER_VERSION ?= 4
+EXECUTABLE ?= render
 
 CU_FILES   := cudaRenderer.cu benchmark.cu
 
@@ -20,7 +21,7 @@ else
     CXX = g++ -m64
 endif
 
-OBJDIR=objs
+OBJDIR ?= objs_v$(RENDER_VERSION)
 CXXFLAGS=-O3 -Wall -g
 HOSTNAME=$(shell hostname)
 
@@ -28,6 +29,7 @@ LIBS       :=
 FRAMEWORKS :=
 
 NVCCFLAGS=-O3 -m64
+NVCCFLAGS += -DRENDER_VERSION=$(RENDER_VERSION)
 LIBS += GL glut cudart
 
 ifneq ($(wildcard /opt/cuda-8.0/.*),)
@@ -47,7 +49,7 @@ OBJS=$(OBJDIR)/main.o $(OBJDIR)/display.o $(OBJDIR)/benchmark.o $(OBJDIR)/refRen
      $(OBJDIR)/cudaRenderer.o $(OBJDIR)/noise.o $(OBJDIR)/ppm.o $(OBJDIR)/sceneLoader.o
 
 
-.PHONY: dirs clean
+.PHONY: dirs clean clean-logs
 
 default: $(EXECUTABLE)
 
@@ -55,7 +57,10 @@ dirs:
 		mkdir -p $(OBJDIR)/
 
 clean:
-		rm -rf $(OBJDIR) *~ $(EXECUTABLE) $(LOGS)
+		rm -rf objs objs_v* *~ render render_v*
+
+clean-logs:
+		rm -rf $(LOGS)
 
 check:	default
 		./checker.pl
