@@ -57,6 +57,11 @@ __constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
 
 /* Self-use MARCO */
 #define TILE_NUM 16
+#define SHARED_MEM_BATCH 128 
+
+#ifndef RENDER_VERSION
+#define RENDER_VERSION 4
+#endif
 
 // including parts of the CUDA code from external files to keep this
 // file simpler and to seperate code that should not be modified
@@ -643,6 +648,76 @@ __global__ void kernelSortTileIndices(int* tileCounts, int* tileOffsets, int* ci
     }
 }
 
+/* Task 4 realize Version 4 */
+__global__ void kernelRenderPixelsWithSharedMem(
+    int* tileCounts, 
+    int* tileOffsets, 
+    int* circleIndices
+) {
+    // 声明共享内存
+    __shared__ float3 sPos[SHARED_MEM_BATCH];
+    __shared__ float  sRad[SHARED_MEM_BATCH];
+    __shared__ int    sCircleIdx[SHARED_MEM_BATCH];
+
+    int pixelX = blockDim.x * blockIdx.x + threadIdx.x;
+    int pixelY = blockDim.y * blockIdx.y + threadIdx.y;
+    int localIdx = threadIdx.y * blockDim.x + threadIdx.x; // Block 内线性索引
+    int tileIdx = blockIdx.y * gridDim.x + blockIdx.x;
+    int totalInTile = tileCounts[tileIdx];
+    int startOffset = tileOffsets[tileIdx];
+
+    // 基础参数计算
+    int imageWidth = cuConstRendererParams.imageWidth;
+    int imageHeight = cuConstRendererParams.imageHeight;
+
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+
+    float2 pixelCenterNorm = make_float2(
+        invWidth * (static_cast<float>(pixelX) + 0.5f),
+        invHeight * (static_cast<float>(pixelY) + 0.5f)
+    );
+
+    // 读取背景颜色
+    float4 localColor = make_float4(0.f, 0.f, 0.f, 0.f); 
+    bool outOfBounds = (pixelX >= imageWidth || pixelY >= imageHeight);
+    if (!outOfBounds) {
+        localColor = *(float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+    }
+
+    for (int batchStart = 0; batchStart < totalInTile; batchStart += SHARED_MEM_BATCH) {
+        
+        int curBatchSize = min(SHARED_MEM_BATCH, totalInTile - batchStart);
+        // 协作搬运圆的数据
+        for (int i = localIdx; i < curBatchSize; i += blockDim.x * blockDim.y) {
+            int cIdx = circleIndices[startOffset + batchStart + i];
+            sCircleIdx[i] = cIdx;
+            sPos[i] = *(float3*)(&cuConstRendererParams.position[cIdx * 3]);
+            sRad[i] = cuConstRendererParams.radius[cIdx];
+        }
+        // 同步确保所有线程都搬完了
+        __syncthreads();
+        // 像素判定与上色
+        if (!outOfBounds) {
+            for (int i = 0; i < curBatchSize; i++) {
+                float3 p = sPos[i];
+                float rad = sRad[i];
+                float distL2 = sqDist(pixelCenterNorm, p);
+                if (pixelInCircle(distL2, rad * rad)) {
+                    shadePixel(sCircleIdx[i], pixelCenterNorm, p, &localColor);
+                }
+            }
+        }
+        // 进入下一批前再次同步，防止上一批数据被覆盖
+        __syncthreads();
+    }
+    // 写回 Global Memory
+    if (!outOfBounds) {
+        int imgIdx = 4 * (pixelY * imageWidth + pixelX);
+        *(float4*)(&cuConstRendererParams.imageData[imgIdx]) = localColor;
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -967,46 +1042,41 @@ void CudaRenderer::buildTileCircleMapping() {
 void
 CudaRenderer::render() {
 
-    // /* Original Version - Circle Unit Based */
-    // 256 threads per block is a healthy number
-    // dim3 blockDim(256, 1);
-    // dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+#if RENDER_VERSION == 1
+    /* Improved Version #1 - Pixel Unit Based */
+    int imageWidth = image->width;
+    int imageHeight = image->height;
 
-    // kernelRenderCircles<<<gridDim, blockDim>>>();
+    dim3 blockDim(TILE_NUM, TILE_NUM);
+    dim3 gridDim(
+        (imageWidth + blockDim.x - 1) / blockDim.x,
+        (imageHeight + blockDim.y - 1) / blockDim.y
+    );
 
-    // Data Parallel -> Spatial Partitioning
+    kernelRenderPixels<<<gridDim, blockDim>>>();
 
-    // /* Improved Version #1 - Pixel Unit Based */
-    // int imageWidth = image->width;
-    // int imageHeight = image->height;
+#elif RENDER_VERSION == 2
+    /* Improved Version #2 - Pixel Unit Based & Traverse Optimized */
+    buildTileCircleMapping();
 
-    // dim3 blockDim(TILE_NUM, TILE_NUM);
-    // dim3 gridDim(
-    //     (imageWidth + blockDim.x - 1) / blockDim.x, 
-    //     (imageHeight + blockDim.y - 1) / blockDim.y
-    // );
+    int imageWidth = image->width;
+    int imageHeight = image->height;
 
-    // kernelRenderPixels<<<gridDim, blockDim>>>();
+    dim3 blockDim(TILE_NUM, TILE_NUM);
+    dim3 gridDim(
+        (imageWidth + blockDim.x - 1) / blockDim.x,
+        (imageHeight + blockDim.y - 1) / blockDim.y
+    );
 
-    // /* Improved Version #2 - Pixel Unit Based & Traverse Optimized */
-    // buildTileCircleMapping();   // 建立映射
+    kernelRenderPixelsWithMapping<<<gridDim, blockDim>>>(
+        deviceTileCounts,
+        deviceTileOffsets,
+        deviceCircleIndices
+    );
 
-    // int imageWidth = image->width;
-    // int imageHeight = image->height;
+#elif RENDER_VERSION == 3 || RENDER_VERSION == 4
+    /* Improved Version #3/#4 - Pure GPU Preprocess */
 
-    // dim3 blockDim(TILE_NUM, TILE_NUM);
-    // dim3 gridDim(
-    //     (imageWidth + blockDim.x - 1) / blockDim.x, 
-    //     (imageHeight + blockDim.y - 1) / blockDim.y
-    // );
-
-    // kernelRenderPixelsWithMapping<<<gridDim, blockDim>>>(
-    //     deviceTileCounts, 
-    //     deviceTileOffsets, 
-    //     deviceCircleIndices
-    // );
-
-    /* Improved Version #3 - Pure GPU Preprocess */
     int gridX = (image->width + TILE_NUM - 1) / TILE_NUM;
     int gridY = (image->height + TILE_NUM - 1) / TILE_NUM;
     int numTiles = gridX * gridY;
@@ -1059,13 +1129,24 @@ CudaRenderer::render() {
         deviceCircleIndices, 
         numTiles
     );
-    
-    // 渲染同 Version 2 
+
+#if RENDER_VERSION == 3
     kernelRenderPixelsWithMapping<<<gridDimRender, blockDimRender>>>(
+        deviceTileCounts,
+        deviceTileOffsets,
+        deviceCircleIndices
+    );
+#else
+    kernelRenderPixelsWithSharedMem<<<gridDimRender, blockDimRender>>>(
         deviceTileCounts, 
         deviceTileOffsets, 
         deviceCircleIndices
     );
+#endif
+
+#else
+#error "Unsupported RENDER_VERSION. Use 1, 2, 3, or 4."
+#endif
 
     cudaDeviceSynchronize();
 }
